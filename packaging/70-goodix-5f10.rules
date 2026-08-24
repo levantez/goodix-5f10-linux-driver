@@ -1,0 +1,2 @@
+# Goodix 27c6:5f10 — доступ + запрет autosuspend. Номер <73 (иначе ACL по uaccess не встанет).
+SUBSYSTEM=="usb", ATTRS{idVendor}=="27c6", ATTRS{idProduct}=="5f10", TAG+="uaccess", GROUP="plugdev", MODE="0660", ATTR{power/control}="on"
