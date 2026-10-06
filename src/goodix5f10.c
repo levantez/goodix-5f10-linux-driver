@@ -144,9 +144,12 @@ finger_zones (const guint8 *reply, guint16 len, const guint16 *base)
 
 typedef void (*CaptureCb)(FpDevice *dev, GError *err);
 
+// CAP_WAIT_OFF первым: результат отдаём сразу после кадра, а снятие пальца
+// ждём уже в начале следующего захвата (иначе одно касание засчитается дважды
+// и фон в CAP_FDT_MODE/CAP_CALIBRATE снимется с пальцем)
 enum cap_states {
-  CAP_QUERY_MCU, CAP_FDT_MODE, CAP_CALIBRATE,
-  CAP_WAIT_ON, CAP_CAPTURE, CAP_WAIT_OFF, CAP_NUM,
+  CAP_WAIT_OFF, CAP_QUERY_MCU, CAP_FDT_MODE, CAP_CALIBRATE,
+  CAP_WAIT_ON, CAP_CAPTURE, CAP_NUM,
 };
 
 static CaptureCb g_capture_cb;  // одна операция за раз
@@ -233,6 +236,16 @@ cap_run (FpiSsm *ssm, FpDevice *dev)
   guint8 payload[1 + FDT_LEN];
   FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
 
+  // fprintd отменяет verify (VerifyStop, таймаут pam_fprintd, смерть клиента) —
+  // без этой проверки опрос CAP_WAIT_ON крутится вечно: claim не снимается,
+  // libfprint копит "нагрев" и блокирует устройство (overheating)
+  if (fpi_device_action_is_cancelled (dev))
+    {
+      fpi_ssm_mark_failed (ssm, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                                     "операция отменена"));
+      return;
+    }
+
   switch (fpi_ssm_get_cur_state (ssm))
     {
     case CAP_QUERY_MCU:
@@ -256,6 +269,8 @@ cap_run (FpiSsm *ssm, FpDevice *dev)
       goodix_tls_read_image (dev, cap_capture_cb, ssm);
       break;
     case CAP_WAIT_OFF:
+      // первый захват: базовой линии ещё нет, палец снимать не с чего
+      if (!self->have_base) { fpi_ssm_next_state (ssm); break; }
       payload[0] = 0x01;
       if (self->have_base) memcpy (payload + 1, self->fdt_base, FDT_LEN);
       else memset (payload + 1, 0xFF, FDT_LEN);
