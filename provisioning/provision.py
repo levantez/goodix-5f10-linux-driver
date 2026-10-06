@@ -17,6 +17,7 @@
 import argparse
 import pathlib
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -26,11 +27,22 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from gx5f10 import PRODUCT_ID, recover, transport
 from gx5f10.logbook import Logbook
 
-DOCS = pathlib.Path(__file__).resolve().parent.parent / "docs"
-WB_FILE = DOCS / "whitebox.hex"
+DOCS = pathlib.Path(__file__).resolve().parent / "docs"
+BLOB_FILE = DOCS / "provision_blob.hex"
 PSK_FILE = DOCS / "psk.hex"
 PSK = bytes.fromhex(PSK_FILE.read_text().strip())
 PORT = 4433
+
+
+def whitebox_from_blob(blob):
+    """White-box = TLV 0xbb010003 внутри production-blob (отдельного файла нет)."""
+    i = 0
+    while i + 8 <= len(blob):
+        tag, length = struct.unpack_from("<II", blob, i)
+        if tag == 0xBB010003:
+            return blob[i + 8:i + 8 + length]
+        i += 8 + length
+    raise SystemExit(f"в {BLOB_FILE} нет TLV 0xbb010003")
 
 
 def write_raw_e0(device, goodix, blob):
@@ -107,8 +119,8 @@ def main() -> int:
                              "вместо одиночного TLV")
     args = parser.parse_args()
 
-    whitebox = bytes.fromhex(WB_FILE.read_text().strip())
-    print(f"white-box (psk=0): {len(whitebox)} байт, {whitebox[:16].hex()}…\n")
+    whitebox = whitebox_from_blob(bytes.fromhex(BLOB_FILE.read_text().strip()))
+    print(f"white-box: {len(whitebox)} байт, {whitebox[:16].hex()}…\n")
 
     recover.soft_mcu_reset()
     log = Logbook("provision")
@@ -145,7 +157,7 @@ def main() -> int:
             return 0
 
         if args.combined:
-            blob = bytes.fromhex((DOCS / "provision_blob.hex").read_text().strip())
+            blob = bytes.fromhex(BLOB_FILE.read_text().strip())
             print(f"\n2. ЗАПИСЬ полного production-blob ({len(blob)} байт, 0xe0) …")
             ok = write_raw_e0(device, goodix, blob)
             print(f"   устройство ответило: {'OK' if ok else 'ОТКАЗ'} (raw={ok})")

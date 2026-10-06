@@ -1,0 +1,25 @@
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+Goodix 27c6:5f10 (milanG) Linux fingerprint driver.
+
+This work is a derivative of and links against libfprint, and reuses code from:
+
+  * libfprint — LGPL-2.1-or-later
+    https://gitlab.freedesktop.org/libfprint/libfprint
+  * goodix-fp-linux-dev / libfprint goodixtls + SIGFM branches — LGPL-2.1-or-later
+    (goodix TLS transport, goodix5xx scaffolding, SIGFM SIFT matcher)
+    https://github.com/goodix-fp-linux-dev
+  * goodix-fp-dump — MIT (protocol reference, used by the provisioning tools)
+    https://github.com/goodix-fp-linux-dev/goodix-fp-dump
+
+Accordingly this driver is distributed under the GNU Lesser General Public
+License, version 2.1 or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Lesser General Public License for more details:
+
+  https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+Individual source files under src/ carry their original upstream copyright
+headers where applicable.

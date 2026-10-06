@@ -172,7 +172,17 @@ python3 -m venv .venv && .venv/bin/pip install pyusb crcmod crccheck pycryptodom
 > опасные команды (запись прошивки/erase/option-byte) — не обходить вручную.
 
 Константы в `provisioning/docs/`: `psk.hex` (наш PSK), `provision_blob.hex`
-(white-box для записи), `config_milang*.hex` (калибровочный конфиг).
+(white-box для записи — TLV `0xbb010003` внутри), `config_milang*.hex`
+(калибровочный конфиг).
+
+> ⚠️ **PSK у всех один и тот же.** `psk.hex` лежит в публичном репозитории, и
+> провижининг записывает этот ключ в каждый сенсор. Кто имеет физический доступ к
+> USB ноутбука, может пройти TLS с сенсором и снимать с него кадры. Шаблоны
+> отпечатков при этом лежат на диске (`/var/lib/fprint`), их защищает только
+> шифрование диска. Ключ на устройство пока не сделан: white-box в
+> `provision_blob.hex` вычислен эмуляцией `gfusb.dll` под этот конкретный ключ.
+> Если Windows с заводским ключом ещё на диске, ключ можно не перезаписывать —
+> см. [Sbenazar/goodix-5f10-libfprint](https://github.com/Sbenazar/goodix-5f10-libfprint).
 
 ---
 
@@ -248,4 +258,5 @@ docs/                    протокол, калибровка, разбор Wi
 
 ## Лицензия
 
-LGPL-2.1-or-later (производное от `libfprint` / goodixtls / SIGFM). См. `LICENSE`.
+LGPL-2.1-or-later (производное от `libfprint` / goodixtls / SIGFM). Текст лицензии — `LICENSE`,
+происхождение кода и авторы — `NOTICE`.

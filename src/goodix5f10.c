@@ -39,6 +39,8 @@
 #define FINGER_OFF    3
 #define POLL_MS       30
 #define SETTLE_MS     150
+#define VERIFY_MS     500   // verify/identify: окно перезахвата от касания, пока нет совпадения
+#define RECAP_MS      20    // пауза между перезахватами внутри окна
 #define SIGFM_THRESHOLD 20   // из бенчмарка: свой(перекрытие) >>1000, чужой=0
 #define ENROLL_STAGES   16   // шаблон из нескольких кадров (покрытие пальца)
 #define MIN_KEYPOINTS   30   // отбраковка слабых кадров при enroll
@@ -61,6 +63,10 @@ struct _FpiDeviceGoodixTls5f10
   GPtrArray *enroll_infos;     // SigfmImgInfo* собранные при enroll
   int        enroll_target;
   FpPrint   *enroll_print;
+
+  gint64     cap_deadline;     // до какого момента перезахватывать (verify/identify)
+  gboolean   cap_matched;      // вердикт последнего кадра
+  FpPrint   *cap_match_print;  // кто совпал при identify (ссылка не наша)
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceGoodixTls5f10, fpi_device_goodixtls5f10, FPI,
@@ -139,8 +145,8 @@ finger_zones (const guint8 *reply, guint16 len, const guint16 *base)
 }
 
 // ===================== capture SSM =====================
-// Захват одного кадра: query_mcu -> fdt_mode(база) -> калибровка(фон) -> ждём палец ->
-// снимок -> ждём отрыв. По завершении вызывает self->capture_cb (устанавливается enroll/verify).
+// Захват: ждём отрыв (с прошлого касания) -> query_mcu -> fdt_mode(база) -> калибровка(фон) ->
+// ждём палец -> снимок (verify/identify: перезахват в окне VERIFY_MS). Затем g_capture_cb.
 
 typedef void (*CaptureCb)(FpDevice *dev, GError *err);
 
@@ -152,7 +158,12 @@ enum cap_states {
   CAP_WAIT_ON, CAP_CAPTURE, CAP_NUM,
 };
 
+// verify/identify: решение по свежему кадру; FALSE — перезахват, пока не вышло окно.
+// У enroll NULL: там каждый кадр идёт в шаблон.
+typedef gboolean (*DecideCb)(FpDevice *dev);
+
 static CaptureCb g_capture_cb;  // одна операция за раз
+static DecideCb  g_decide_cb;
 
 static const guint8 fdt_payload[] = {
   0x01, 0x80, 0xb1, 0x80, 0xc1, 0x80, 0xa6, 0x80, 0xb6, 0x80, 0xa5, 0x80, 0xb6,
@@ -199,6 +210,7 @@ cap_wait_on_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError *
   if (zc >= FINGER_ZONES)
     {
       fpi_device_report_finger_status (dev, FP_FINGER_STATUS_PRESENT);
+      self->cap_deadline = g_get_monotonic_time () + VERIFY_MS * 1000;
       fpi_ssm_next_state_delayed (ssm, SETTLE_MS);
     }
   else
@@ -212,6 +224,12 @@ cap_capture_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError *
   FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
   if (!self->finger) self->finger = calloc (FRAME, sizeof (Pix));
   decode_frame (self->finger, len, data);
+  // неудачное прилегание даёт мало точек — пока палец лежит, пробуем ещё кадр
+  if (g_decide_cb && !g_decide_cb (dev) && g_get_monotonic_time () < self->cap_deadline)
+    {
+      fpi_ssm_jump_to_state_delayed (ssm, CAP_CAPTURE, RECAP_MS);
+      return;
+    }
   fpi_ssm_next_state (ssm);
 }
 
@@ -285,15 +303,20 @@ cap_complete (FpiSsm *ssm, FpDevice *dev, GError *err)
 {
   CaptureCb cb = g_capture_cb;
   g_capture_cb = NULL;
+  g_decide_cb = NULL;
   if (cb) cb (dev, err);
   else if (err) g_error_free (err);
 }
 
 // снять один кадр -> cb(dev, err); при успехе self->finger валиден
 static void
-start_capture (FpDevice *dev, CaptureCb cb)
+start_capture (FpDevice *dev, CaptureCb cb, DecideCb decide)
 {
+  FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
   g_capture_cb = cb;
+  g_decide_cb = decide;
+  self->cap_matched = FALSE;
+  self->cap_match_print = NULL;
   fpi_ssm_start (fpi_ssm_new (dev, cap_run, CAP_NUM), cap_complete);
 }
 
@@ -492,7 +515,7 @@ static void enroll_capture_cb (FpDevice *dev, GError *err);
 static void
 enroll_next (FpDevice *dev)
 {
-  start_capture (dev, enroll_capture_cb);
+  start_capture (dev, enroll_capture_cb, NULL);
 }
 
 static void
@@ -548,12 +571,10 @@ dev_enroll (FpDevice *dev)
 
 // ===================== verify / identify =====================
 
-static void
-verify_capture_cb (FpDevice *dev, GError *err)
+static gboolean
+verify_decide (FpDevice *dev)
 {
   FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
-  if (err) { fpi_device_verify_complete (dev, err); return; }
-
   FpPrint *tmpl = NULL;
   fpi_device_get_verify_data (dev, &tmpl);
   GPtrArray *infos = load_template (tmpl);
@@ -564,23 +585,31 @@ verify_capture_cb (FpDevice *dev, GError *err)
   if (infos) g_ptr_array_foreach (infos, (GFunc) sigfm_free_info, NULL),
              g_ptr_array_free (infos, TRUE);
 
+  self->cap_matched = match;
+  return match;
+}
+
+static void
+verify_capture_cb (FpDevice *dev, GError *err)
+{
+  FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
+  if (err) { fpi_device_verify_complete (dev, err); return; }
+
   fpi_device_verify_report (dev,
-    match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, NULL, NULL);
+    self->cap_matched ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, NULL, NULL);
   fpi_device_verify_complete (dev, NULL);
 }
 
 static void
 dev_verify (FpDevice *dev)
 {
-  start_capture (dev, verify_capture_cb);
+  start_capture (dev, verify_capture_cb, verify_decide);
 }
 
-static void
-identify_capture_cb (FpDevice *dev, GError *err)
+static gboolean
+identify_decide (FpDevice *dev)
 {
   FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
-  if (err) { fpi_device_identify_complete (dev, err); return; }
-
   GPtrArray *gallery = NULL;
   fpi_device_get_identify_data (dev, &gallery);
   SigfmImgInfo *probe = extract_last (self);
@@ -597,14 +626,25 @@ identify_capture_cb (FpDevice *dev, GError *err)
     }
   if (probe) sigfm_free_info (probe);
 
-  fpi_device_identify_report (dev, found, NULL, NULL);
+  self->cap_match_print = found;
+  self->cap_matched = (found != NULL);
+  return self->cap_matched;
+}
+
+static void
+identify_capture_cb (FpDevice *dev, GError *err)
+{
+  FpiDeviceGoodixTls5f10 *self = FPI_DEVICE_GOODIXTLS5F10 (dev);
+  if (err) { fpi_device_identify_complete (dev, err); return; }
+
+  fpi_device_identify_report (dev, self->cap_match_print, NULL, NULL);
   fpi_device_identify_complete (dev, NULL);
 }
 
 static void
 dev_identify (FpDevice *dev)
 {
-  start_capture (dev, identify_capture_cb);
+  start_capture (dev, identify_capture_cb, identify_decide);
 }
 
 // ===================== type =====================
