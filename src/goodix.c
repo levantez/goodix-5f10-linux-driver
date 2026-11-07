@@ -1277,23 +1277,58 @@ enum goodix_tls_handshake_stages {
 };
 
 static void
+notify_tls_ready (FpDevice *dev, GError *error)
+{
+  FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS (dev);
+  FpiDeviceGoodixTlsPrivate *priv =
+    fpi_device_goodixtls_get_instance_private (self);
+  GoodixCallbackInfo *callback = g_steal_pointer (&priv->tls_ready_callback);
+
+  if (!callback)
+    {
+      g_clear_error (&error);
+      return;
+    }
+
+  ((GoodixNoneCallback) callback->callback) (dev, callback->user_data, error);
+  g_free (callback);
+}
+
+static void
 on_tls_successfully_established (FpDevice *dev, gpointer user_data,
                                  GError *error)
 {
+  if (error)
+    {
+      /* The device does not ACK 0xd4 on this firmware. The TLS handshake
+       * itself has completed, so the short command timeout is expected. */
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT))
+        {
+          fp_dbg ("device did not ACK TLS completion (0xd4); continuing");
+          g_error_free (error);
+          notify_tls_ready (dev, NULL);
+          return;
+        }
+
+      fp_err ("failed to finalize TLS handshake: %s", error->message);
+      notify_tls_ready (dev, error);
+      return;
+    }
+
   fp_dbg ("HANDSHAKE DONE");
-  FpiDeviceGoodixTls * self = FPI_DEVICE_GOODIXTLS (dev);
-  FpiDeviceGoodixTlsPrivate * priv =
-    fpi_device_goodixtls_get_instance_private (self);
-  ((GoodixNoneCallback) priv->tls_ready_callback->callback)(
-    dev, priv->tls_ready_callback->user_data, NULL);
-  g_clear_pointer (&priv->tls_ready_callback, g_free);
+  notify_tls_ready (dev, NULL);
 }
 static void
 tls_handshake_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   if (error)
-    fp_dbg ("failed to do tls handshake: %s (code: %d)", error->message,
-            error->code);
+    {
+      fp_err ("failed to do TLS handshake: %s (code: %d)", error->message,
+              error->code);
+      notify_tls_ready (dev, error);
+      return;
+    }
+
   goodix_send_tls_successfully_established (
     dev, on_tls_successfully_established, NULL);
 }
@@ -1370,7 +1405,7 @@ on_goodix_request_tls_connection (FpDevice *dev, guint8 *data,
   if (error)
     {
       fp_err ("failed to get tls handshake: %s", error->message);
-      goodix_send_tls_successfully_established (FP_DEVICE (dev), NULL, NULL);
+      notify_tls_ready (dev, error);
       return;
     }
   FpiDeviceGoodixTls *self = FPI_DEVICE_GOODIXTLS (user_data);
@@ -1389,6 +1424,7 @@ goodix_tls_ready (GoodixTlsServer *server, GError *err, gpointer dev)
     {
       fp_err ("failed to init tls server: %s, code: %d", err->message,
               err->code);
+      notify_tls_ready (FP_DEVICE (dev), err);
       return;
     }
   goodix_send_request_tls_connection (FP_DEVICE (dev),
@@ -1416,6 +1452,9 @@ goodix_tls_init (FpDevice *dev, GoodixNoneCallback callback, gpointer user_data)
     {
       fp_err ("failed to init tls server, error: %s, code: %d", err->message,
               err->code);
+      g_free (priv->tls_hop);
+      priv->tls_hop = NULL;
+      notify_tls_ready (dev, err);
       return;
     }
 
