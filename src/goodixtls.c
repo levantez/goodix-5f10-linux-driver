@@ -40,6 +40,13 @@
 #include "goodix.h"
 #include "goodixtls.h"
 
+static const guint8 goodix_5f10_default_psk[GOODIX_5F10_PSK_LENGTH] = {
+  0xc2, 0x7e, 0x89, 0x4f, 0x34, 0x51, 0xf8, 0x26,
+  0x51, 0x8f, 0x18, 0x4e, 0x2a, 0xdc, 0x51, 0x2c,
+  0x4b, 0x68, 0x02, 0x60, 0x5a, 0x65, 0x28, 0xe8,
+  0xd2, 0xfc, 0xe9, 0x74, 0xac, 0x1a, 0x4b, 0x85,
+};
+
 static GError *
 err_from_ssl (void)
 {
@@ -183,6 +190,8 @@ goodix_tls_server_init (GoodixTlsServer *self, GError **error)
   g_autofree gchar *psk_data = NULL;
   g_autoptr(GError) psk_error = NULL;
   gsize psk_length = 0;
+  const guint8 *psk = goodix_5f10_default_psk;
+  const char *psk_source = "built-in default";
   if (!g_file_get_contents (psk_path, &psk_data, &psk_length, &psk_error))
     {
       if (!g_error_matches (psk_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
@@ -192,28 +201,24 @@ goodix_tls_server_init (GoodixTlsServer *self, GError **error)
           g_propagate_error (error, g_steal_pointer (&psk_error));
           return FALSE;
         }
-
-      psk_path = "/var/lib/fprint/goodix-5f10/psk-default";
       g_clear_error (&psk_error);
-      if (!g_file_get_contents (psk_path, &psk_data, &psk_length, &psk_error))
+    }
+  else
+    {
+      if (psk_length != GOODIX_5F10_PSK_LENGTH)
         {
-          g_prefix_error (&psk_error,
-                          "Unable to load Goodix 5F10 fallback PSK from %s: ",
-                          psk_path);
-          g_propagate_error (error, g_steal_pointer (&psk_error));
+          g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+                       "Goodix 5F10 PSK file %s must contain exactly %u raw bytes",
+                       psk_path, GOODIX_5F10_PSK_LENGTH);
           return FALSE;
         }
+      psk = (const guint8 *) psk_data;
+      psk_source = psk_path;
     }
-  if (psk_length != GOODIX_5F10_PSK_LENGTH)
-    {
-      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
-                   "Goodix 5F10 PSK file %s must contain exactly %u raw bytes",
-                   psk_path, GOODIX_5F10_PSK_LENGTH);
-      return FALSE;
-    }
-  memcpy (self->psk, psk_data, sizeof (self->psk));
-  OPENSSL_cleanse (psk_data, psk_length);
-  fp_dbg ("Loaded Goodix 5F10 PSK from %s", psk_path);
+  memcpy (self->psk, psk, sizeof (self->psk));
+  if (psk_data)
+    OPENSSL_cleanse (psk_data, psk_length);
+  fp_dbg ("Using Goodix 5F10 PSK from %s", psk_source);
 
   SSL_load_error_strings ();
   OpenSSL_add_ssl_algorithms ();
