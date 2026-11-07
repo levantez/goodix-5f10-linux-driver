@@ -1300,6 +1300,16 @@ on_tls_successfully_established (FpDevice *dev, gpointer user_data,
 {
   if (error)
     {
+      /* The device does not ACK 0xd4 on this firmware. The TLS handshake
+       * itself has completed, so the short command timeout is expected. */
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT))
+        {
+          fp_dbg ("device did not ACK TLS completion (0xd4); continuing");
+          g_error_free (error);
+          notify_tls_ready (dev, NULL);
+          return;
+        }
+
       fp_err ("failed to finalize TLS handshake: %s", error->message);
       notify_tls_ready (dev, error);
       return;
