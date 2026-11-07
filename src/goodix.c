@@ -1416,6 +1416,10 @@ goodix_tls_init (FpDevice *dev, GoodixNoneCallback callback, gpointer user_data)
     {
       fp_err ("failed to init tls server, error: %s, code: %d", err->message,
               err->code);
+      g_free (priv->tls_hop);
+      priv->tls_hop = NULL;
+      callback (dev, user_data, err);
+      g_error_free (err);
       return;
     }
 

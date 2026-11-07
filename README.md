@@ -2,8 +2,8 @@
 
 Userspace-драйвер сканера отпечатка **Goodix `27c6:5f10`** (платформа *milanG*),
 который стоит в ноутбуках **HONOR** (MagicBook X16 Pro, FMI-XX и родственных).
-Под Windows для него используется USB-драйвер `gfusb` (1.1.127.4); под Linux
-готового драйвера нет ни у вендора, ни в upstream `libfprint`, ни в сообществе.
+Под Windows для него используется USB-драйвер `gfusb` (1.1.127.4); официальной
+поддержки 5F10 в upstream `libfprint` пока нет.
 
 Этот проект доводит сенсор до **штатного входа в систему и `sudo` по отпечатку**
 через `libfprint` + `fprintd` + `pam_fprintd`. Работает целиком в userspace
@@ -51,7 +51,7 @@ Userspace-драйвер сканера отпечатка **Goodix `27c6:5f10`*
 ### Что делает драйвер при захвате
 
 1. **Активация** (open): `nop → enable_chip → reset → upload DEVICE_CONFIG →
-   powerdown_scan_freq`, затем **TLS-PSK хендшейк** нашим ключом.
+   powerdown_scan_freq`, затем **TLS-PSK хендшейк** ключом этого устройства.
 2. **Калибровка FDT**: чтение базового уровня ёмкостных зон.
 3. **Детект пальца**: опрос выделенного **FDT-канала** (не картинки!) — палец
    понижает показания зон; ждём полного касания (≥7 из 10 зон). *(У этого чипа
@@ -65,12 +65,7 @@ Userspace-драйвер сканера отпечатка **Goodix `27c6:5f10`*
 
 ### Криптография / провижининг
 
-Сенсор общается по TLS-PSK. Заводской PSK запечатан Windows-DPAPI и под Linux
-недоступен. Поэтому PSK **перезаписывается нашим** штатной командой
-`PRESET_PSK_WRITE` (см. `provisioning/`). После этого TLS поднимается нашим
-ключом (`provisioning/docs/psk.hex`). White-box для записи PSK универсален для
-всего семейства `5f10`; калибровочный `DEVICE_CONFIG` (DAC) вычисляется из OTP
-конкретного устройства.
+Сенсор общается по TLS-PSK. При открытии устройства драйвер сначала загружает 32 сырых байта из `/var/lib/fprint/goodix-5f10/psk`; если файла нет, используется `/var/lib/fprint/goodix-5f10/psk-default`. Путь для личного ключа можно переопределить переменной окружения `GOODIX_5F10_PSK_FILE`. Это формат файла, создаваемого [утилитой Sbenazar для восстановления ключа из Windows](https://github.com/Sbenazar/goodix-5f10-psk). Если устройство уже переведено на другой PSK, сохраните соответствующий 32-байтовый ключ в одном из этих файлов. Сам драйвер ключ в сенсор не записывает. Калибровочный `DEVICE_CONFIG` (DAC) по-прежнему вычисляется из OTP конкретного устройства.
 
 ---
 
@@ -103,12 +98,18 @@ cd goodix-5f10-driver
 # 1. Собрать драйвер (.so) и тест-харнес
 ./build.sh
 
-# 2. (ТОЛЬКО для «свежего» сенсора — один раз) записать наш PSK в устройство
-#    Если сенсор уже провизинен этим драйвером — пропусти. См. раздел «Провижининг».
-#    (нужен рабочий Python-venv и goodix-fp-dump, см. provisioning/README-ниже)
+# 2. Поместить восстановленный Windows PSK в /var/lib/fprint/goodix-5f10/psk
+#    (32 сырых байта; права 0600; файл доступен службе fprintd)
 
-# 3. Установить драйвер в систему (sudo). Системный libfprint НЕ трогается.
-./packaging/install.sh
+# 3. Установить TOD-модуль и udev-правило (для Debian/Ubuntu/Mint).
+TOD_DIR="$(pkg-config --variable=libdir libfprint-2)/libfprint-2/tod-1"
+sudo install -Dm755 build/libfprint-tod-goodix5f10.so \
+  "$TOD_DIR/libfprint-tod-goodix5f10.so"
+sudo install -Dm644 "$(find . -name '70-goodix-5f10.rules' -print -quit)" \
+  /etc/udev/rules.d/70-goodix-5f10.rules
+sudo udevadm control --reload
+sudo udevadm trigger --attr-match=idVendor=27c6
+sudo systemctl restart fprintd
 
 # 4. Зарегистрировать отпечаток штатным инструментом (спросит палец ~16 раз)
 fprintd-enroll
@@ -142,17 +143,19 @@ sudo -k; sudo true         # должно предложить палец; по 
 
 ```bash
 ./build.sh
-packaging/run.sh list             # найти устройство (палец не нужен)
-packaging/run.sh enroll myfinger  # регистрация -> /tmp/myfinger.fp
-packaging/run.sh verify myfinger  # сверка (свой/чужой)
-DEBUG=1 packaging/run.sh verify myfinger   # с отладочным логом (видно sigfm score)
+FP_TOD_DRIVERS_DIR="$PWD/build" build/tod_test list
+FP_TOD_DRIVERS_DIR="$PWD/build" build/tod_test enroll myfinger
+FP_TOD_DRIVERS_DIR="$PWD/build" build/tod_test verify myfinger
+FP_TOD_DRIVERS_DIR="$PWD/build" G_MESSAGES_DEBUG=all build/tod_test verify myfinger
 ```
 
 ---
 
-## Провижининг (запись нашего PSK) — для «свежего» сенсора
+## Отдельная операция provisioning (не нужна с Windows PSK)
 
-Если сенсор ещё не провизинен этим драйвером, один раз выполняется запись PSK.
+Если сенсор ещё не имеет PSK, инструменты в `provisioning/` умеют записать новый.
+Эта операция меняет постоянное состояние сенсора и не нужна, когда используется
+ключ, восстановленный из Windows. TOD-модуль сам provisioning не запускает.
 Инструменты — в `provisioning/` (Python, используют протокол-референс
 `goodix-fp-dump`):
 
@@ -195,11 +198,11 @@ python3 -m venv .venv && .venv/bin/pip install pyusb crcmod crccheck pycryptodom
   Каждый сенсор milanG имеет свой OTP → свой DAC → свой конфиг. Порт проверен
   **байт-в-байт** против рабочего конфига (см. `tools/milang_verify.c`) и на
   устройстве (сенсор принимает сгенерированный конфиг и калибруется).
-* **PSK-провижининг** обязателен — один раз на каждое устройство (см. раздел
-  «Провижининг»), т.к. заводской PSK под Linux недоступен.
+* **PSK-файл** нужен для TLS: восстановите индивидуальный ключ из Windows и
+  установите его в `/var/lib/fprint/goodix-5f10/psk`. Provisioning не обязателен.
 
-Итого для нового такого ноутбука: `./build.sh` → провижининг PSK (один раз) →
-`./packaging/install.sh` → `fprintd-enroll`. Пересобирать под устройство не нужно.
+Итого: восстановить Windows PSK → сохранить в файл с правами `0600` → `./build.sh`
+→ установить TOD-модуль и udev-правило → `fprintd-enroll`. Пересобирать под устройство не нужно.
 
 Проверить генерацию конфига (без устройства):
 ```bash
@@ -235,10 +238,6 @@ src/                     исходники драйвера
   goodix*.c/.h           транспорт + TLS Goodix
   goodix5f10.c/.h        драйвер milanG + SIGFM-интеграция
   sigfm/                 SIFT-матчер (OpenCV)
-packaging/
-  install.sh             установка .so в систему + udev + рестарт fprintd
-  run.sh                 запуск тест-харнеса без установки
-  70-goodix-5f10.rules   udev-правило (доступ к сенсору)
 tools/
   tod_test.c             тест-харнес (enroll/verify/identify без fprintd)
   mindtct_probe.c        диагностика извлечения минуций (NBIS)

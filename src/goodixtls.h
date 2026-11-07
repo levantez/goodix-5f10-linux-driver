@@ -22,6 +22,8 @@
 
 #include <glib.h>
 
+#define GOODIX_5F10_PSK_LENGTH 32
+
 struct _GoodixTlsServer;
 
 
@@ -44,6 +46,7 @@ typedef struct _GoodixTlsServer
   int       client_fd;
 
   pthread_t serve_thread;
+  guint8    psk[GOODIX_5F10_PSK_LENGTH];
 } GoodixTlsServer;
 
 /**

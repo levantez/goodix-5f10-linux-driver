@@ -4,6 +4,14 @@ project('goodixtls5f10-tod', ['c', 'cpp'],
                            'warning_level=1', 'werror=false',
                            'b_lundef=false'])  # fp_* резолвит хост (fprintd) в рантайме
 
+opencv_dep = dependency('opencv5', required : false)
+if not opencv_dep.found()
+  opencv_dep = dependency('opencv4', required : false)
+endif
+if not opencv_dep.found()
+  error('OpenCV development files are required (pkg-config module opencv5 or opencv4)')
+endif
+
 deps = [
   dependency('libfprint-2-tod-1'),
   dependency('openssl'),
@@ -11,7 +19,7 @@ deps = [
   dependency('glib-2.0'),
   dependency('gio-2.0'),
   dependency('gmodule-2.0'),
-  dependency('opencv4'),
+  opencv_dep,
 ]
 
 srcs = files(
