@@ -65,6 +65,7 @@ struct _FpiDeviceGoodixTls5f10
   FpPrint   *enroll_print;
 
   gint64     cap_deadline;     // до какого момента перезахватывать (verify/identify)
+  gint64     cap_last_wait_log;
   gboolean   cap_matched;      // вердикт последнего кадра
   FpPrint   *cap_match_print;  // кто совпал при identify (ссылка не наша)
 };
@@ -144,6 +145,19 @@ finger_zones (const guint8 *reply, guint16 len, const guint16 *base)
   return c;
 }
 
+static void
+log_capture_wait (FpiDeviceGoodixTls5f10 *self, const char *state, int zones,
+                  int required)
+{
+  gint64 now = g_get_monotonic_time ();
+  if (!self->cap_last_wait_log || now - self->cap_last_wait_log >= G_USEC_PER_SEC)
+    {
+      fp_dbg ("capture waiting for %s: %d/%d finger zones", state, zones,
+              required);
+      self->cap_last_wait_log = now;
+    }
+}
+
 // ===================== capture SSM =====================
 // Захват: ждём отрыв (с прошлого касания) -> query_mcu -> fdt_mode(база) -> калибровка(фон) ->
 // ждём палец -> снимок (verify/identify: перезахват в окне VERIFY_MS). Затем g_capture_cb.
@@ -209,12 +223,17 @@ cap_wait_on_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError *
   int zc = finger_zones (data, len, self->baseline);
   if (zc >= FINGER_ZONES)
     {
+      fp_dbg ("capture detected finger: %d/%d zones", zc, ZONES);
+      self->cap_last_wait_log = 0;
       fpi_device_report_finger_status (dev, FP_FINGER_STATUS_PRESENT);
       self->cap_deadline = g_get_monotonic_time () + VERIFY_MS * 1000;
       fpi_ssm_next_state_delayed (ssm, SETTLE_MS);
     }
   else
-    fpi_ssm_jump_to_state_delayed (ssm, CAP_WAIT_ON, POLL_MS);
+    {
+      log_capture_wait (self, "finger", zc, FINGER_ZONES);
+      fpi_ssm_jump_to_state_delayed (ssm, CAP_WAIT_ON, POLL_MS);
+    }
 }
 
 static void
@@ -241,11 +260,16 @@ cap_wait_off_cb (FpDevice *dev, guint8 *data, guint16 len, gpointer ssm, GError 
   int zc = finger_zones (data, len, self->baseline);
   if (zc < FINGER_OFF)
     {
+      fp_dbg ("capture detected finger lifted: %d/%d zones", zc, ZONES);
+      self->cap_last_wait_log = 0;
       fpi_device_report_finger_status (dev, FP_FINGER_STATUS_NONE);
       fpi_ssm_next_state (ssm);
     }
   else
-    fpi_ssm_jump_to_state_delayed (ssm, CAP_WAIT_OFF, POLL_MS);
+    {
+      log_capture_wait (self, "finger lift", zc, FINGER_OFF);
+      fpi_ssm_jump_to_state_delayed (ssm, CAP_WAIT_OFF, POLL_MS);
+    }
 }
 
 static void
@@ -317,6 +341,7 @@ start_capture (FpDevice *dev, CaptureCb cb, DecideCb decide)
   g_decide_cb = decide;
   self->cap_matched = FALSE;
   self->cap_match_print = NULL;
+  self->cap_last_wait_log = 0;
   fpi_ssm_start (fpi_ssm_new (dev, cap_run, CAP_NUM), cap_complete);
 }
 
@@ -342,6 +367,7 @@ static void
 store_template (FpPrint *print, GPtrArray *infos)
 {
   GVariantBuilder b;
+  guint stored = 0;
   g_variant_builder_init (&b, G_VARIANT_TYPE ("aay"));
   for (guint i = 0; i < infos->len; i++)
     {
@@ -351,7 +377,10 @@ store_template (FpPrint *print, GPtrArray *infos)
       g_variant_builder_add_value (&b,
         g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, ser, len, 1));
       free (ser);
+      stored++;
     }
+  fp_dbg ("enroll template: %u captured frames, %u serialized", infos->len,
+          stored);
   GVariant *data = g_variant_builder_end (&b);
   fpi_print_set_type (print, FPI_PRINT_RAW);
   fpi_print_set_device_stored (print, FALSE);
@@ -554,6 +583,8 @@ enroll_capture_cb (FpDevice *dev, GError *err)
 
   SigfmImgInfo *info = extract_last (self);
   int kp = info ? sigfm_keypoints_count (info) : 0;
+  fp_dbg ("enroll frame: %d keypoints (minimum %d); accepted so far %u/%d",
+          kp, MIN_KEYPOINTS, self->enroll_infos->len, self->enroll_target);
   if (info && kp >= MIN_KEYPOINTS)
     {
       g_ptr_array_add (self->enroll_infos, info);
@@ -601,6 +632,9 @@ verify_decide (FpDevice *dev)
   fpi_device_get_verify_data (dev, &tmpl);
   GPtrArray *infos = load_template (tmpl);
   SigfmImgInfo *probe = extract_last (self);
+  fp_dbg ("verify: loaded %u template frames; probe has %d keypoints",
+          infos ? infos->len : 0,
+          probe ? sigfm_keypoints_count (probe) : 0);
 
   gboolean match = (infos && probe) ? match_infos (infos, probe) : FALSE;
   if (probe) sigfm_free_info (probe);
