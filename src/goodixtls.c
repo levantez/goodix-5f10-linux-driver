@@ -157,7 +157,8 @@ goodix_tls_init_serve (void *me)
 gboolean
 goodix_tls_server_deinit (GoodixTlsServer *self, GError **error)
 {
-  // сначала дождаться потока (он держит ssl_layer), потом освобождать — иначе UAF в потоке
+  // Wake a thread blocked in SSL_accept before joining it.
+  shutdown (self->sock_fd, SHUT_RDWR);
   pthread_join (self->serve_thread, NULL);
 
   SSL_shutdown (self->ssl_layer);
@@ -212,6 +213,7 @@ goodix_tls_server_init (GoodixTlsServer *self, GError **error)
     }
   memcpy (self->psk, psk_data, sizeof (self->psk));
   OPENSSL_cleanse (psk_data, psk_length);
+  fp_dbg ("Loaded Goodix 5F10 PSK from %s", psk_path);
 
   SSL_load_error_strings ();
   OpenSSL_add_ssl_algorithms ();
@@ -257,7 +259,24 @@ goodix_tls_server_init (GoodixTlsServer *self, GError **error)
   tls_config_ssl (self->ssl_layer);
   SSL_set_fd (self->ssl_layer, self->sock_fd);
 
-  pthread_create (&self->serve_thread, 0, goodix_tls_init_serve, self);
+  int thread_error = pthread_create (&self->serve_thread, NULL,
+                                     goodix_tls_init_serve, self);
+  if (thread_error != 0)
+    {
+      close (self->client_fd);
+      close (self->sock_fd);
+      self->client_fd = -1;
+      self->sock_fd = -1;
+      SSL_free (self->ssl_layer);
+      self->ssl_layer = NULL;
+      SSL_CTX_free (self->ssl_ctx);
+      self->ssl_ctx = NULL;
+      OPENSSL_cleanse (self->psk, sizeof (self->psk));
+      g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (thread_error),
+                   "failed to create TLS server thread: %s",
+                   g_strerror (thread_error));
+      return FALSE;
+    }
 
   return TRUE;
 }

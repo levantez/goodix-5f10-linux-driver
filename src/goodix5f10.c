@@ -471,15 +471,37 @@ act_run (FpiSsm *ssm, FpDevice *dev)
 }
 
 static void
+dev_open_complete (FpDevice *dev, GError *err)
+{
+  if (err)
+    {
+      GError *close_err = NULL;
+      goodix_dev_deinit (dev, &close_err);
+      if (close_err)
+        {
+          fp_err ("failed to release device after open error: %s",
+                  close_err->message);
+          g_error_free (close_err);
+        }
+    }
+
+  fpi_device_open_complete (dev, err);
+}
+
+static void
 tls_ready (FpDevice *dev, gpointer user_data, GError *err)
 {
-  fpi_device_open_complete (dev, err);
+  dev_open_complete (dev, err);
 }
 
 static void
 act_complete (FpiSsm *ssm, FpDevice *dev, GError *err)
 {
-  if (err) { fpi_device_open_complete (dev, err); return; }
+  if (err)
+    {
+      dev_open_complete (dev, err);
+      return;
+    }
   goodix_tls_init (dev, tls_ready, NULL);
 }
 
